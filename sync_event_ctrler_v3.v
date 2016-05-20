@@ -2,21 +2,21 @@
 `include "registers.v"
 module sync_event_ctrler_v3(
     input clk,
-    input reset,    
+    input rst,    
     input in_master_status,
     input in_slave_status,
-    input [`PORT_NUMBER - 1:0] in_sync_rx_valid,//buffer ready in_buffer_rq  
-    input [`SYNC_INTERVAL_WIDTH - 1:0] in_sync_interval,//:one unit : 1us
-    input [`LINK_DELAY_WIDTH - 1:0] in_link_delay,//one unit : 1ns
-    input [`SYNC_TIMEOUT_WIDTH - 1:0] in_sync_timeout,
-    inout [`DATA_WIDTH - 1:0] in_sync_data,//data in
-    inout [`CTRL_WIDTH - 1:0] in_sync_ctrl,//FF  00
-    input [`PORT_NUMBER - 1:0]in_sync_wr,
-    input [`PORT_NUMBER - 1:0] in_sync_udp_rdy,//next buffer//
+    input [`PORT_NUMBER - 1:0] in_sync_rx_valid,//前端buffer传输帧请求信号
+    input [`SYNC_INTERVAL_WIDTH - 1:0] in_sync_interval,//Master模式下发送sync帧的间隔，单位us
+    input [`LINK_DELAY_WIDTH - 1:0] in_link_delay,//链路延时，单位ns
+    input [`SYNC_TIMEOUT_WIDTH - 1:0] in_sync_timeout,//Slave模式下，收不到sync帧的超时时间长度
+    input [`DATA_WIDTH - 1:0] in_sync_data,//data in
+    input [`CTRL_WIDTH - 1:0] in_sync_ctrl,//FF  00//数据控制位输入，表示数据帧的开始和结束
+    input [`PORT_NUMBER - 1:0]in_sync_wr,//数据有效输入
+    input [`PORT_NUMBER - 1:0] in_sync_udp_rdy,//next buffer//下一级buffer是否ready
     output [`PORT_NUMBER * `DATA_WIDTH - 1:0] out_sync_udp_data,//output data
     output [`PORT_NUMBER * `CTRL_WIDTH - 1:0] out_sync_udp_ctrl,//output ctrl
-    output [`PORT_NUMBER - 1:0] out_sync_udp_wr,
-    output [`PORT_NUMBER - 1:0] out_sync_rdy,//select in port
+    output [`PORT_NUMBER - 1:0] out_sync_udp_wr,//数据有效输出
+    output [`PORT_NUMBER - 1:0] out_sync_rdy,//select in port选择输入的端口
     output [`TIME_WIDTH - 1:0] out_local_clk_counter,
     output [`TIME_WIDTH - 1:0] out_global_time,
     output reg out_sync_state
@@ -82,7 +82,14 @@ module sync_event_ctrler_v3(
     reg [63:0] master_sync_time;
     reg [63:0] slave_sync_time;
     reg [63:0] diff_time;
+    reg [63:0]	diff_time_l;
+    reg [63:0]	diff_time_h;
+    wire[63:0]	diff_time_s;
+    reg			select_com;
     reg [63:0] cur_acc_value;
+    reg [15:0] compression_index;
+    reg not_first_flag;
+	
     //-------------------------------------//
 
 
@@ -125,7 +132,7 @@ module sync_event_ctrler_v3(
 	assign sync_rxv2 = in_sync_rx_valid ^ sync_rxv1;
 //***********************receive_state***********************//
 wire reset_rev;
-assign reset_rev = (reset || in_master_status);
+assign reset_rev = (rst || in_master_status);
 always @ (posedge clk or posedge reset_rev)begin 
 	if(reset_rev)
 		current_state_rev <= s0_rev;
@@ -164,8 +171,8 @@ always @ (current_state_rev or in_sync_rx_valid or in_sync_wr or in_sync_ctrl or
     endcase
 end
 //generate data
-always @ (posedge clk or posedge reset)begin
-	if(reset)begin
+always @ (posedge clk or posedge rst)begin
+	if(rst)begin
 		rev_Headerstamp <= 0;
 		rev_correctionField <= 0;
 		rev_originTimestamp <= 0;
@@ -176,6 +183,8 @@ always @ (posedge clk or posedge reset)begin
 		mac_d_rec <= 0;
 		mac_s_rec <= 0;
 		rev_other <= 0;
+		compression<= 0;
+		minus_flag <= 0;
 	end
 	else begin
 		case(next_state_rev)
@@ -220,29 +229,49 @@ always @ (posedge clk or posedge reset)begin
 			end
 			s11_rev:begin
 				time1_reg <= rev_originTimestamp[79:0] + time2_reg;
-				time0_reg <= local_clk_counter - rev_Headerstamp;//+ 1
+				time0_reg <= 690;//此处可能有错误，所以先用固定值来确定 local_clk_counter - rev_Headerstamp;//+ 1
 			end
+			///////////////////////////////////////////////////////////////
 			s12_rev:begin
 				master_sync_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16 - last_global_time;
 				slave_sync_time <= global_time - last_global_time;
 			end
 			s13_rev:begin
 				cur_acc_value <= 0;
-				if(master_sync_time > slave_sync_time)
-					minus_flag <= 0
+				if(master_sync_time > slave_sync_time)begin
+					minus_flag <= 0;
 					diff_time <= master_sync_time - slave_sync_time;
-				else
+				end
+				else begin
 					diff_time <= slave_sync_time - master_sync_time;
-					minus_flag <= 1
+					minus_flag <= 1;
+				end
 			end
 			s14_rev:begin
 				rev_over <= 1;
-				while(cur_acc_value < slave_sync_time)
+				cycle <= {1'b0,slave_sync_time[63:1]};
+			//	cycle <= slave_sync_time;
+				if(diff_time[0]==1)
 				begin
-					cur_acc_value <= cur_acc_value + diff_time;
-					compression <= compression + 1;
+					diff_time_l<={1'b0,diff_time[63:1]};
+					diff_time_h<={{1'b0,diff_time[63:1]}+1'b1};
 				end
+				else begin
+					diff_time_l<={1'b0,diff_time[63:1]};
+					diff_time_h<={1'b0,diff_time[63:1]};
+				end
+				
+				//wile
+	/* 			if(cur_acc_value < slave_sync_time)
+					begin
+						cur_acc_value <= cur_acc_value + diff_time;
+						compression <= compression + 1;
+					end
+				else begin
+				
+				end */
 			end
+			////////////////////////////////////////////////////////////////
 			default:begin
 				rev_Headerstamp <= rev_Headerstamp;
 				rev_correctionField <= rev_correctionField;
@@ -259,13 +288,13 @@ always @ (posedge clk or posedge reset)begin
 	end
 end
 //****************************send_state******************************//
-always @ (posedge clk or posedge reset)begin    
-	if(reset)
+always @ (posedge clk or posedge rst)begin    
+	if(rst)
 		current_state <= s0;
 	else
 		current_state <= next_state;  
  end
-always @ (current_state or reset or flag1 or rev_over or in_master_status) begin   
+always @ (current_state or rst or flag1 or rev_over or in_master_status) begin   
 		next_state = s0;
     case(current_state)
 		s0:if((flag1 == 1 && in_master_status == 1) || rev_over)
@@ -282,8 +311,8 @@ always @ (current_state or reset or flag1 or rev_over or in_master_status) begin
         default: next_state = s0;
     endcase
 end
-always @ (posedge clk or posedge reset)begin
-	if(reset)begin
+always @ (posedge clk or posedge rst)begin
+	if(rst)begin
 		udp_data <= 0;
 		udp_ctrl <= 0;
 		udp_wr <= 0;
@@ -350,8 +379,8 @@ always @ (posedge clk or posedge reset)begin
 	end
 end
 //---------------switch------ --------//
-always @ (posedge clk or posedge reset)begin
-	if(reset)begin
+always @ (posedge clk or posedge rst)begin
+	if(rst)begin
 		Headerstamp <= local_clk_counter;
 		Mac_d <= 48'h011B19000000;
 		Mac_s <= 48'h3C970E0F6857;
@@ -421,8 +450,8 @@ end
 generate
 genvar i;
 	for(i = 0;i < `PORT_NUMBER;i = i + 1)begin:sync_udp_group
-		always @(posedge clk or posedge reset )begin
-			if (reset)begin
+		always @(posedge clk or posedge rst )begin
+			if (rst)begin
 					sync_udp_data[i] <= 0;
 					sync_udp_ctrl[i] <= 0;
 					sync_udp_wr[i] <= 0;
@@ -450,8 +479,8 @@ genvar j;
 		assign out_sync_udp_wr[j] = sync_udp_wr[j];
 	end 
 endgenerate
-always @(posedge clk or posedge reset)begin
-	if (reset)begin
+always @(posedge clk or posedge rst)begin
+	if (rst)begin
 		sync_rdy <= 0;
 		in_port <= 0;
 	end
@@ -469,66 +498,88 @@ always @(posedge clk or posedge reset)begin
 	end
 end
 //
-always @(posedge clk or posedge reset)begin
-        if (reset)
+always @(posedge clk or posedge rst)begin
+        if (rst)
             local_clk_counter <= 64'h0;
         else
             local_clk_counter <= local_clk_counter + 1; 
 end
 // global_time <= rev_originTimestamp[79:3] 1ns + rev_correctionField[63:3]  +  in_link_delay[LINK_DELAY_WIDTH - 1:3] + local_clk_counter –  rev_Headerstamp[DATA_WIDTH - 1:0] + 1;
-always @(posedge clk or posedge reset) begin///1ns
-        if (reset)
-            global_time <= 64'h0;//unit_1ns
-            flag_fre_start <= 0;
+always @(posedge clk or posedge rst) begin///1ns
+        if (rst)begin
+            global_time <= 64'h0;//unit_1ns/*****/
+///////////////////////////////////////////////////////////////////////////////          
+			 flag_fre_start <= 0;
             last_global_time <= 64'h0;
             cycle <= 0;
             cur_cycle <= 0;
-            compression <= 0;
-            minus_flag <= 0;
-        else if(rev_over)
-			global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;//
-			last_global_time <= <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;//
-			flag_fre_start <= 1;
-		else if(flag_fre_start)
-			cur_cycle = cur_cycle + 1;
-			if(cur_cycle == cycle)
+            compression_index <= 0;
+			 select_com<=1'b0;
+			 not_first_flag <= 0;
+		end
+        else if(rev_over)begin
+			if(not_first_flag)begin
+				global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;///*****/
+				last_global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;//
+				flag_fre_start <= 1;
 				cur_cycle <= 0;
+				end
+			else begin
+				global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;///*****/
+				last_global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;//
+				not_first_flag <= 1;
+				cur_cycle <= 0;
+				flag_fre_start <= 0;
+			end
+		end
+		else if(flag_fre_start)begin
+			cur_cycle <=cur_cycle + 1;
+			if(cur_cycle == cycle)begin
+				cur_cycle <= 0;
+				select_com<=!select_com;
 				if(minus_flag)
-					global_time <= global_time + 8 - compression;
+					//global_time <= global_time + 8 - compression;
+					global_time <= global_time + 8 - diff_time_s;
 				else
-					global_time <= global_time + 8 + compression;
+					//global_time <= global_time + 8 + compression;
+					global_time <= global_time + 8 + diff_time_s;
+			end
 			else
-				global_time <= global_time + 8;
+				global_time <= global_time + 8;/*****/
+			end
 		else
             global_time <= global_time + 8; // to implement my own algorithm
+////////////////////////////////////////////////////////////////////////////////////
 end
+assign diff_time_s=(select_com)?(diff_time_h-4'hf):(diff_time_l-4'hf);
 //-------------1us_counter = 125 x 8ns--------------------//
-always @ (posedge clk or posedge reset)begin
-	if(reset)
+always @ (posedge clk or posedge rst)begin
+	if(rst)
 		cnt_1us <= 0;
 	else if  (cnt_1us == 124)
 		cnt_1us <= 0;
 	else cnt_1us <= cnt_1us + 1;
 end
 ////master
-always @ (posedge clk or posedge reset)begin
-	if(reset)
+always @ (posedge clk or posedge rst)begin
+	if(rst)
 		cnt_master_interval <= 0;
 	else if (cnt_master_interval == in_sync_interval)
 		cnt_master_interval <= 0;
 	else if (cnt_1us == 124)
 		cnt_master_interval <= cnt_master_interval + 1;
 end
-always @ (posedge clk or posedge reset)begin
-	if(reset)
+always @ (posedge clk or posedge rst)begin
+	if(rst)
 		flag1 <= 0;
 	else if (cnt_master_interval == in_sync_interval)
 		flag1 <= 1;
-	else  flag1 <= 0;
+	else 
+		flag1 <= 0;
 end
 ////slave
-always@(posedge clk or posedge reset)begin
-	if(reset)
+always@(posedge clk or posedge rst)begin
+	if(rst)
 		timeout_slave <= 0;
 	else if(current_state_rev == s14_rev)
 		timeout_slave <= 0;		
@@ -538,15 +589,16 @@ always@(posedge clk or posedge reset)begin
 		timeout_slave <= timeout_slave + 1;
 	end
 end
-always@(posedge clk or posedge reset)begin
-	if(reset)
+always@(posedge clk or posedge rst)begin
+	if(rst)
 		out_sync_state <= 0;
 	else if (in_master_status)
 		out_sync_state <= 1;
 	else if (in_slave_status)
 		if (timeout_slave == in_sync_timeout)
 			out_sync_state <= 0;
-		else out_sync_state <= 1;
+		else 
+			out_sync_state <= 1;
 	else
 		out_sync_state <= 0;
 end
