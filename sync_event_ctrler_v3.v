@@ -82,10 +82,9 @@ module sync_event_ctrler_v3(
     reg [63:0] master_sync_time;
     reg [63:0] slave_sync_time;
     reg [63:0] diff_time;
-    reg [63:0]	diff_time_l;
-    reg [63:0]	diff_time_h;
+    reg [3:0][63:0]	diff_time_l;
     wire[63:0]	diff_time_s;
-    reg			select_com;
+    reg	[1:0]		select_com;
     reg [63:0] cur_acc_value;
     reg [15:0] compression_index;
     reg not_first_flag;
@@ -229,7 +228,7 @@ always @ (posedge clk or posedge rst)begin
 			end
 			s11_rev:begin
 				time1_reg <= rev_originTimestamp[79:0] + time2_reg;
-				time0_reg <= 690;//此处可能有错误，所以先用固定值来确定 local_clk_counter - rev_Headerstamp;//+ 1
+				time0_reg <= 690;//此处可能有错误，所以先用固定值代替 local_clk_counter - rev_Headerstamp;//+ 1
 			end
 			///////////////////////////////////////////////////////////////
 			s12_rev:begin
@@ -249,17 +248,51 @@ always @ (posedge clk or posedge rst)begin
 			end
 			s14_rev:begin
 				rev_over <= 1;
-				cycle <= {1'b0,slave_sync_time[63:1]};
+				cycle <= {5'b0,slave_sync_time[63:5]};
 			//	cycle <= slave_sync_time;
-				if(diff_time[0]==1)
-				begin
-					diff_time_l<={1'b0,diff_time[63:1]};
-					diff_time_h<={{1'b0,diff_time[63:1]}+1'b1};
-				end
-				else begin
-					diff_time_l<={1'b0,diff_time[63:1]};
-					diff_time_h<={1'b0,diff_time[63:1]};
-				end
+
+    			case(diff_time[1:0])
+    				2'b01:begin
+    					diff_time_l[0] <= diff_time >> 2;
+    					diff_time_l[1] <= diff_time >> 2;
+    					diff_time_l[2] <= diff_time >> 2;
+    					diff_time_l[3] <= diff_time >> 2;
+    				end
+    				2'b01:begin
+    					diff_time_l[0] <= diff_time >> 2 + 2'b01;
+    					diff_time_l[1] <= diff_time >> 2;
+    					diff_time_l[2] <= diff_time >> 2;
+    					diff_time_l[3] <= diff_time >> 2;
+    				end
+    				2'b10:begin
+    					diff_time_l[0] <= diff_time >> 2 + 2'b01;
+    					diff_time_l[1] <= diff_time >> 2;
+    					diff_time_l[2] <= diff_time >> 2 + 2'b01;
+    					diff_time_l[3] <= diff_time >> 2;
+    				end
+    				2'b11:begin
+    					diff_time_l[0] <= diff_time >> 2 + 2'b01;
+    					diff_time_l[1] <= diff_time >> 2 + 2'b01;
+    					diff_time_l[2] <= diff_time >> 2 + 2'b01;
+    					diff_time_l[3] <= diff_time >> 2;
+    				end
+					default: begin
+						diff_time_l[0] <= diff_time >> 2;
+    					diff_time_l[1] <= diff_time >> 2;
+    					diff_time_l[2] <= diff_time >> 2;
+    					diff_time_l[3] <= diff_time >> 2;
+					end
+   				endcase
+
+				// if(diff_time[0]==1)
+				// begin
+				// 	diff_time_l<={1'b0,diff_time[63:1]};
+				// 	diff_time_h<={{1'b0,diff_time[63:1]}+1'b1};
+				// end
+				// else begin
+				// 	diff_time_l<={1'b0,diff_time[63:1]};
+				// 	diff_time_h<={1'b0,diff_time[63:1]};
+				// end
 				
 				//wile
 	/* 			if(cur_acc_value < slave_sync_time)
@@ -512,7 +545,7 @@ always @(posedge clk or posedge rst) begin///1ns
 			 flag_fre_start <= 0;
             last_global_time <= 64'h0;
             cycle <= 0;
-            cur_cycle <= 0;
+            cur_cycle <= 1;
             compression_index <= 0;
 			 select_com<=1'b0;
 			 not_first_flag <= 0;
@@ -522,21 +555,20 @@ always @(posedge clk or posedge rst) begin///1ns
 				global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;///*****/
 				last_global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;//
 				flag_fre_start <= 1;
-				cur_cycle <= 0;
+				cur_cycle <= 1;
 				end
 			else begin
 				global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;///*****/
 				last_global_time <= time1_reg[63:0] + {time0_reg[60:0],3'b000} + 16;//
 				not_first_flag <= 1;
-				cur_cycle <= 0;
+				cur_cycle <= 1;
 				flag_fre_start <= 0;
 			end
 		end
 		else if(flag_fre_start)begin
-			cur_cycle <=cur_cycle + 1;
 			if(cur_cycle == cycle)begin
-				cur_cycle <= 0;
-				select_com<=!select_com;
+				cur_cycle <= 1;
+				select_com<= select_com + 1;
 				if(minus_flag)
 					//global_time <= global_time + 8 - compression;
 					global_time <= global_time + 8 - diff_time_s;
@@ -545,13 +577,17 @@ always @(posedge clk or posedge rst) begin///1ns
 					global_time <= global_time + 8 + diff_time_s;
 			end
 			else
-				global_time <= global_time + 8;/*****/
+				begin
+			    	cur_cycle <=cur_cycle + 1;
+					global_time <= global_time + 8;/*****/
+				end
 			end
+
 		else
             global_time <= global_time + 8; // to implement my own algorithm
 ////////////////////////////////////////////////////////////////////////////////////
 end
-assign diff_time_s=(select_com)?(diff_time_h-4'hf):(diff_time_l-4'hf);
+assign diff_time_s = diff_time_l[select_com];
 //-------------1us_counter = 125 x 8ns--------------------//
 always @ (posedge clk or posedge rst)begin
 	if(rst)
