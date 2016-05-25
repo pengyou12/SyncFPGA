@@ -79,9 +79,12 @@ module sync_event_ctrler_v3(
     reg [63:0] cur_cycle;
     reg [2:0] compression;
     reg minus_flag;
+    reg temp_minus_flag;
+    reg temp_minus_flag;
     reg [63:0] master_sync_time;
     reg [63:0] slave_sync_time;
     reg [63:0] diff_time;
+    reg [63:0] temp_diff_time;
     reg [3:0][63:0]	diff_time_l;
     wire[63:0]	diff_time_s;
     reg	[1:0]		select_com;
@@ -117,6 +120,7 @@ module sync_event_ctrler_v3(
 	localparam s12_rev        =  16'h1000;
 	localparam s13_rev        =  16'h2000;
 	localparam s14_rev        =  16'h4000;
+	localparam s15_rev        =  16'h8000;
 	
 	wire [`PORT_NUMBER - 1:0] sync_rxv1;//top buffer valid 
 	wire [`PORT_NUMBER - 1:0] sync_rxv2;//top buffer valid 
@@ -164,7 +168,8 @@ always @ (current_state_rev or in_sync_rx_valid or in_sync_wr or in_sync_ctrl or
 		s11_rev: next_state_rev = s12_rev;
 		s12_rev: next_state_rev = s13_rev;
 		s13_rev: next_state_rev = s14_rev;
-		s14_rev: next_state_rev = s0_rev;
+		s14_rev: next_state_rev = s15_rev;
+		s15_rev: next_state_rev = s0_rev;
 		//can add more states here
         default: next_state_rev = s0_rev;
     endcase
@@ -184,6 +189,9 @@ always @ (posedge clk or posedge rst)begin
 		rev_other <= 0;
 		compression<= 0;
 		minus_flag <= 0;
+		diff_time <= 0;
+		temp_diff_time <= 0;
+		temp_minus_flag <= 0;
 	end
 	else begin
 		case(next_state_rev)
@@ -238,17 +246,31 @@ always @ (posedge clk or posedge rst)begin
 			s13_rev:begin
 				cur_acc_value <= 0;
 				if(master_sync_time > slave_sync_time)begin
-					minus_flag <= 0;
-					diff_time <= master_sync_time - slave_sync_time;
+					temp_minus_flag <= 0;
+					temp_diff_time <= master_sync_time - slave_sync_time;
 				end
 				else begin
-					diff_time <= slave_sync_time - master_sync_time;
-					minus_flag <= 1;
+					temp_diff_time <= slave_sync_time - master_sync_time;
+					temp_minus_flag <= 1;
 				end
 			end
 			s14_rev:begin
+				if(temp_minus_flag == minus_flag)begin
+					diff_time <= diff_time + temp_diff_time;
+					minus_flag <= minus_flag;
+				end
+				else if(diff_time >= temp_diff_time)begin
+					diff_time <= diff_time - temp_diff_time;
+					minus_flag <= minus_flag;
+				end
+				else begin
+					diff_time <= temp_diff_time - diff_time;
+					minus_flag <= temp_minus_flag;
+				end 
+			end
+			s15_rev:begin
 				rev_over <= 1;
-				cycle <= {5'b0,slave_sync_time[63:5]};
+				cycle <= 32'h1DCD650;
 			//	cycle <= slave_sync_time;
 
     			case(diff_time[1:0])
@@ -566,9 +588,10 @@ always @(posedge clk or posedge rst) begin///1ns
 			end
 		end
 		else if(flag_fre_start)begin
-			if(cur_cycle == cycle)begin
+			
+			if(cur_cycle == 32'h1DCD650)begin
 				cur_cycle <= 1;
-				select_com<= select_com + 1;
+				select_com<=!select_com;
 				if(minus_flag)
 					//global_time <= global_time + 8 - compression;
 					global_time <= global_time + 8 - diff_time_s;
@@ -576,18 +599,16 @@ always @(posedge clk or posedge rst) begin///1ns
 					//global_time <= global_time + 8 + compression;
 					global_time <= global_time + 8 + diff_time_s;
 			end
-			else
-				begin
-			    	cur_cycle <=cur_cycle + 1;
-					global_time <= global_time + 8;/*****/
-				end
+			else begin
+				global_time <= global_time + 8;/*****/
+				cur_cycle <=cur_cycle + 1;
 			end
-
+		end
 		else
             global_time <= global_time + 8; // to implement my own algorithm
 ////////////////////////////////////////////////////////////////////////////////////
 end
-assign diff_time_s = diff_time_l[select_com];
+assign diff_time_s=(select_com)?(diff_time_h):(diff_time_l);
 //-------------1us_counter = 125 x 8ns--------------------//
 always @ (posedge clk or posedge rst)begin
 	if(rst)
